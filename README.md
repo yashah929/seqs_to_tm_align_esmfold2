@@ -199,6 +199,8 @@ Run `python3 run_sequence_tm_pipeline.py run --help` for the full CLI.
 - Scientific motivation and TM-align interpretation: `docs/SCIENTIFIC_CONTEXT.md`
 - Release and publishing checklist: `docs/RELEASE_CHECKLIST.md`
 
+The documentation set was written to do more than enumerate commands. It also gives the scientific rationale for the score definition, the intended use case for WT-anchored structural comparison, and the operational details needed to run or resume large batches without relying on project-specific background.
+
 ## References
 
 - Zhang Y, Skolnick J. TM-align: a protein structure alignment algorithm based on the TM-score. *Nucleic Acids Research*. 2005;33(7):2302-2309. https://pmc.ncbi.nlm.nih.gov/articles/PMC1084323/
