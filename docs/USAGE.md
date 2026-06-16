@@ -80,7 +80,7 @@ The `sequences.csv` file is meant to be edited for your own run. The `sequences.
 ./run_smoke_test.sh
 ```
 
-This:
+This command:
 
 - builds a small input set from local TEM and APH reference PDBs
 - runs two unique tasks

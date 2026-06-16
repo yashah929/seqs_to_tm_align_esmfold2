@@ -1,8 +1,8 @@
 # Sequence-to-TM-Score Pipeline
 
-This repository provides a general-purpose pipeline for scoring protein sequences against wild-type reference structures.
+This repository contains a sequence-to-structure comparison pipeline for protein variant sets tied to known reference structures.
 
-Given a table of amino-acid sequences and a mapping from each sequence to the correct reference structure, the pipeline:
+Given a table of amino-acid sequences and a mapping from each sequence to its reference structure, the pipeline:
 
 1. folds each unique sequence through the ESM API
 2. converts the fold response into a PDB when needed
@@ -22,19 +22,19 @@ Suggested short tagline:
 
 `Fold sequences with ESM, align to WT with TM-align, and checkpoint the results.`
 
-## Why This Exists
+## Scientific Aim
 
-The practical problem is straightforward: sequence-level variant generation is cheap, but sequence-level scores are not always enough. If the downstream question is whether a designed sequence still preserves the global structure of a known protein, you need a structural comparison step.
+In many design and variant-screening settings, sequence-level scores are not enough. The relevant question is structural: does a candidate sequence still adopt the wild-type fold, or has it moved away from the reference state?
 
-This repository is built for that situation. It takes candidate amino-acid sequences, folds them through the ESM API, aligns the predicted structure to the correct WT/reference structure with TM-align, and reports a structural similarity score that is interpretable at scale.
+The pipeline addresses that question in batch form. It folds each candidate through the ESM API, aligns the predicted structure to the correct WT/reference structure with TM-align, and records a structural similarity score suitable for downstream analysis.
 
-The scientific motivation and TM-align rationale are documented in `docs/SCIENTIFIC_CONTEXT.md`.
+The scientific rationale and scoring conventions are described in `docs/SCIENTIFIC_CONTEXT.md`.
 
 ## What The Pipeline Measures
 
 The primary output is `tm_score`, defined here as the TM-align score normalized by the WT/reference structure length.
 
-That choice is deliberate. In this workflow the reference structure is the fixed object of interest. The question is not "how self-consistent is the prediction on its own length scale?" The question is "how similar is this predicted structure to the WT structure I care about?"
+This choice is intentional. In the present workflow the reference structure is the fixed object of interest. The quantity of interest is similarity to that WT/reference structure, not self-normalized agreement on the candidate's own length scale.
 
 The pipeline also records:
 
@@ -88,7 +88,7 @@ export ESM_API_KEY='YOUR_KEY_HERE'
 ./run_smoke_test.sh
 ```
 
-This generates a small self-contained test set from the local TEM and APH reference structures and runs two unique fold-and-align tasks.
+This builds a small test set from the bundled TEM and APH reference structures and runs two unique fold-and-align tasks.
 
 ### 3. Run a real batch
 
@@ -169,14 +169,14 @@ Additional supporting outputs:
 
 ## Resumability
 
-The pipeline is built to survive interruption.
+The pipeline is designed for interrupted or long-running jobs.
 
 If a run stops partway through:
 
 - rerun the same command against the same `outdir`
 - completed tasks will be skipped
 - cached predicted PDBs will be reused
-- aggregate outputs will be refreshed
+- aggregate outputs will be refreshed at the end of the rerun
 
 By default, checkpoint entries with status `scored`, `fold_failed`, or `tmalign_failed` are treated as complete. If you want to retry failures, rerun with `--retry-failed`.
 
@@ -201,5 +201,9 @@ Run `python3 run_sequence_tm_pipeline.py run --help` for the full CLI.
 
 ## References
 
-- Zhang Y, Skolnick J. TM-align: a protein structure alignment algorithm based on the TM-score. *Nucleic Acids Research* 33(7):2302-2309. https://pmc.ncbi.nlm.nih.gov/articles/PMC1084323/
+- Zhang Y, Skolnick J. TM-align: a protein structure alignment algorithm based on the TM-score. *Nucleic Acids Research*. 2005;33(7):2302-2309. https://pmc.ncbi.nlm.nih.gov/articles/PMC1084323/
+- Lin Z, Akin H, Rao R, Hie B, Zhu Z, et al. Evolutionary-scale prediction of atomic-level protein structure with a language model. *Science*. 2023;379(6637):1123-1130. https://www.science.org/doi/10.1126/science.ade2574
+- Hu Y, Cheng W, Wang J, Liu Y. EasyNano: rapid epitope-targeted nanobody CDR design via differentiable distogram optimization with ESMFold2. *arXiv*. 2026. https://arxiv.org/abs/2606.12772
 - Biohub fold endpoint used by this pipeline: `POST https://biohub.ai/api/v1/fold`
+
+At the time of writing, I have not identified a standalone published methods paper for ESMFold2 itself. The documentation therefore cites the original ESMFold paper for the model family and a recent preprint that explicitly uses the `ESMFold2-Fast` / `ESMFold2` nomenclature.
