@@ -1,5 +1,7 @@
 # Scientific Context
 
+This document is meant to supply the conceptual background for the repository, not just a list of references. It explains what structural question the pipeline is intended to answer, why TM-score is used as the main endpoint, and why the WT/reference-normalized score is the quantity carried through the outputs.
+
 ## Overarching Goal
 
 The purpose of this repository is to measure whether a designed or mutated amino-acid sequence remains close to the wild-type structure in three-dimensional space.
