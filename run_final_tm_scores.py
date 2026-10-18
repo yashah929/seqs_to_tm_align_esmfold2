@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Legacy experiment-specific predecessor; see docs/USAGE.md for provenance.
+
+Retained for historical reproducibility, not maintained as the general CLI.
+Its external experiment directories and historical cache conventions are required.
+"""
 
 from __future__ import annotations
 

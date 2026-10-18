@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="555" viewBox="0 0 1000 555" role="img" aria-labelledby="title desc">
+<title id="title">From candidate sequence to reference-anchored similarity</title><desc id="desc">Blue is the candidate prediction branch; orange is the experimental reference branch. Both feed TM-align. Cache and checkpoint provenance support resumption.</desc>
+<defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 Z" fill="#607387"/></marker></defs>
+<rect width="1000" height="555" fill="white"/>
+<g font-family="Arial, Helvetica, sans-serif" fill="#203348">
+<text x="30" y="38" font-size="25" fill="#203348" font-weight="bold">Computational assessment of predicted fold preservation</text>
+<rect x="30" y="75" width="295" height="130" rx="12" fill="#f3f7fd" stroke="#2864b4" stroke-width="1.5"/>
+<text x="48" y="106" font-size="20" fill="#2864b4" font-weight="bold">1  Candidate sequence table</text>
+<text x="48" y="139" font-size="18" fill="#203348" font-weight="normal">sequence_id · target_name</text>
+<text x="48" y="165" font-size="18" fill="#203348" font-weight="normal">amino-acid sequence</text>
+<rect x="380" y="75" width="260" height="130" rx="12" fill="#f3f7fd" stroke="#2864b4" stroke-width="1.5"/>
+<text x="398" y="106" font-size="20" fill="#2864b4" font-weight="bold">2  ESMFold2 prediction</text>
+<text x="398" y="139" font-size="18" fill="#203348" font-weight="normal">Configured API model</text>
+<text x="398" y="165" font-size="18" fill="#203348" font-weight="normal">Retries on transient errors</text>
+<rect x="695" y="75" width="275" height="130" rx="12" fill="#f3f7fd" stroke="#2864b4" stroke-width="1.5"/>
+<text x="713" y="106" font-size="20" fill="#2864b4" font-weight="bold">3  Prediction cache</text>
+<text x="713" y="139" font-size="18" fill="#203348" font-weight="normal">Cα PDB + metadata</text>
+<text x="713" y="165" font-size="18" fill="#203348" font-weight="normal">Sequence / model / file hash</text>
+<path d="M325 140 H375" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M640 140 H690" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="30" y="260" width="370" height="145" rx="12" fill="#fff7ee" stroke="#b15b16" stroke-width="1.5"/>
+<text x="48" y="291" font-size="20" fill="#b15b16" font-weight="bold">Experimental WT reference</text>
+<text x="48" y="324" font-size="18" fill="#203348" font-weight="normal">Target → PDB file + selected chain</text>
+<text x="48" y="350" font-size="18" fill="#203348" font-weight="normal">Observed protein Cα coordinates</text>
+<text x="48" y="376" font-size="18" fill="#203348" font-weight="normal">Single model; explicit chain selection</text>
+<path d="M175 205 V253" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="190" y="237" font-size="16" fill="#b15b16" font-weight="normal">target mapping</text>
+<rect x="465" y="260" width="220" height="145" rx="12" fill="#f0f8f5" stroke="#18786b" stroke-width="1.5"/>
+<text x="483" y="291" font-size="20" fill="#18786b" font-weight="bold">4  TM-align</text>
+<text x="483" y="324" font-size="18" fill="#203348" font-weight="normal">Prediction = Chain_1</text>
+<text x="483" y="350" font-size="18" fill="#203348" font-weight="normal">Reference = Chain_2</text>
+<text x="483" y="376" font-size="18" fill="#203348" font-weight="normal">WT-normalized score</text>
+<path d="M400 330 H458" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M825 205 V230 H575 V253" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="750" y="260" width="220" height="145" rx="12" fill="#f0f8f5" stroke="#18786b" stroke-width="1.5"/>
+<text x="768" y="291" font-size="20" fill="#18786b" font-weight="bold">5  Results</text>
+<text x="768" y="324" font-size="18" fill="#203348" font-weight="normal">Rows + unique tasks</text>
+<text x="768" y="350" font-size="18" fill="#203348" font-weight="normal">TM · RMSD · lengths</text>
+<text x="768" y="376" font-size="18" fill="#203348" font-weight="normal">Separate failure counts</text>
+<path d="M685 330 H743" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="30" y="452" width="940" height="72" rx="10" fill="#f4f6f8"/>
+<text x="50" y="480" font-size="18" fill="#203348" font-weight="bold">Checkpoint + resume</text>
+<text x="285" y="480" font-size="17" fill="#203348" font-weight="normal">Reuse verified scores; re-align after reference or scorer changes.</text>
+<text x="285" y="505" font-size="17" fill="#203348" font-weight="normal">Keep valid cached predictions when only alignment inputs change.</text>
+<path d="M860 405 V445" fill="none" stroke="#607387" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+</g></svg>

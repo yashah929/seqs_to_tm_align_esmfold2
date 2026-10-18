@@ -1,0 +1,5 @@
+sequence_id,design_strategy
+tem_wt,baseline
+tem_smoke_mutant,synthetic_teaching_variant
+aph_wt,baseline
+aph_smoke_mutant,synthetic_teaching_variant

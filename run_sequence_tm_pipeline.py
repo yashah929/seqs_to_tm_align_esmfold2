@@ -7,11 +7,13 @@ import asyncio
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, median
@@ -27,7 +29,8 @@ DEFAULT_MODEL = "esmfold2-fast-2026-05"
 RETRY_HTTP_STATUSES = {429, 500, 502, 503, 504}
 COOLDOWN_ON_403 = 60.0
 VALID_SEQUENCE_RE = re.compile(r"^[A-Z]+$")
-TMALIGN_SCORE_RE = re.compile(r"TM-score\s*=\s*([0-9.]+)")
+CONVERSION_VERSION = "atom37-ca-v2"
+REFERENCE_POLICY = "single-model-single-chain-standard-ATOM-CA-highest-occupancy-v1"
 TMALIGN_LEN_RE = re.compile(r"Length of Chain_([12]):\s*(\d+)")
 TMALIGN_ALIGNED_RE = re.compile(r"Aligned length=\s*(\d+),\s*RMSD=\s*([0-9.]+),\s*Seq_ID=n_identical/n_aligned=\s*([0-9.]+)")
 
@@ -66,7 +69,7 @@ class TargetDefinition:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="General-purpose ESM API to TM-align pipeline for amino-acid sequences."
+        description="Assess predicted fold preservation against experimental references with Biohub ESMFold2 and TM-align."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -86,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--model", default=DEFAULT_MODEL, help="ESM folding model name to send to the API.")
     run.add_argument("--max-concurrent-requests", type=int, default=4, help="Max in-flight ESM API requests.")
     run.add_argument("--max-concurrent-tmalign", type=int, default=4, help="Max in-flight TM-align subprocesses.")
-    run.add_argument("--max-retries", type=int, default=8, help="Max API retries per unique fold task.")
+    run.add_argument("--max-retries", type=int, default=8, help="Maximum total API attempts per unique fold task (including first attempt).")
     run.add_argument("--request-timeout", type=int, default=120, help="Per-request timeout in seconds.")
     run.add_argument("--retry-sleep-seconds", type=float, default=10.0, help="Base retry sleep; multiplied by attempt.")
     run.add_argument("--cooldown-seconds", type=float, default=0.0, help="Optional sleep after each completed unique task.")
@@ -102,12 +105,18 @@ def parse_args() -> argparse.Namespace:
 def read_table(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix in {".tsv", ".txt"}:
-        return pd.read_csv(path, sep="\t")
-    return pd.read_csv(path)
+        return pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    return pd.read_csv(path, dtype=str, keep_default_na=False)
+
+
+def required_text(value: object, field: str) -> str:
+    if value is None or pd.isna(value) or not str(value).strip():
+        raise ValueError(f"Missing or blank {field}")
+    return str(value).strip()
 
 
 def normalize_sequence(raw: object) -> str:
-    sequence = str(raw).upper().replace(" ", "").replace("\n", "")
+    sequence = re.sub(r"\s+", "", required_text(raw, "sequence")).upper()
     if not sequence:
         raise ValueError("Empty sequence")
     if not VALID_SEQUENCE_RE.fullmatch(sequence):
@@ -115,6 +124,8 @@ def normalize_sequence(raw: object) -> str:
     unknown = sorted(set(sequence) - set(AA1_TO_AA3))
     if unknown:
         raise ValueError(f"Sequence contains unsupported residues for CA-PDB conversion: {''.join(unknown)}")
+    if not 3 <= len(sequence) <= 9999:
+        raise ValueError("Sequence length must be 3..9999 for this single-chain PDB workflow")
     return sequence
 
 
@@ -123,20 +134,55 @@ def stable_fold_task_id(target_name: str, sequence: str, model: str) -> str:
     return f"{target_name}__sha1_{digest}"
 
 
+def selected_ca_records(pdb_text: str, chain: str | None = None) -> list[str]:
+    """Return one standard ATOM CA per observed residue; never merge models/chains."""
+    lines = pdb_text.splitlines()
+    models = [i for i, line in enumerate(lines) if line.startswith("MODEL ")]
+    if len(models) > 1:
+        raise ValueError("Multiple structural models are unsupported; supply a single model")
+    if models:
+        ends = [i for i, line in enumerate(lines) if line.startswith("ENDMDL")]
+        if len(ends) != 1 or ends[0] <= models[0] or any(
+            line.startswith("ATOM  ") and not models[0] < i < ends[0] for i, line in enumerate(lines)
+        ):
+            raise ValueError("Malformed MODEL/ENDMDL boundaries or ATOM records outside the selected model")
+    atoms = [line for line in lines if line.startswith("ATOM  ")]
+    chains = {line[21:22] for line in atoms}
+    if chain is None:
+        if len(chains) != 1:
+            raise ValueError("Reference/prediction must have one chain; specify template_chain for a multichain reference")
+        chain = next(iter(chains))
+    atoms = [line for line in atoms if line[21:22] == chain]
+    selected: dict[str, tuple[tuple[float, bool, bool], str]] = {}
+    seen_conformers: set[tuple[str, str]] = set()
+    for line in atoms:
+        if line[12:16].strip() != "CA":
+            continue
+        if line[17:20] not in AA3_TO_AA1:
+            raise ValueError(f"Unsupported reference/prediction residue: {line[17:20]}")
+        key = line[22:27]
+        conformer = (key, line[16:17])
+        if conformer in seen_conformers:
+            raise ValueError(f"Duplicate CA residue/conformer {key!r}; separate incompatible segments")
+        seen_conformers.add(conformer)
+        xyz = [float(line[start:start + 8]) for start in (30, 38, 46)]
+        occupancy = float(line[54:60].strip() or "1")
+        if not all(math.isfinite(x) for x in [*xyz, occupancy]) or occupancy < 0:
+            raise ValueError("Nonfinite coordinates or invalid occupancy in PDB")
+        if occupancy == 0:
+            continue
+        rank = (occupancy, line[16:17] == " ", line[16:17] == "A")
+        if key not in selected or rank > selected[key][0]:
+            selected[key] = (rank, line[:16] + " " + line[17:])
+    if len(selected) < 3:
+        raise ValueError(f"Fewer than three usable standard ATOM CA residues in chain {chain!r}")
+    return [entry[1] for entry in selected.values()]
+
+
 def prepare_template_pdb(template: TargetDefinition, prepared_dir: Path) -> TargetDefinition:
-    if template.template_chain is None:
-        return template
+    kept_lines = selected_ca_records(template.template_path.read_text(), template.template_chain)
     prepared_dir.mkdir(parents=True, exist_ok=True)
-    out_path = prepared_dir / f"{template.target_name}__chain_{template.template_chain}.pdb"
-    kept_lines: list[str] = []
-    with template.template_path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            if raw_line.startswith(("ATOM", "HETATM", "TER")) and len(raw_line) > 21 and raw_line[21].strip() == template.template_chain:
-                kept_lines.append(raw_line.rstrip("\n"))
-    if not kept_lines:
-        raise ValueError(
-            f"No ATOM/HETATM records found for chain {template.template_chain!r} in {template.template_path}"
-        )
+    out_path = prepared_dir / f"{template.target_name}__reference.pdb"
     kept_lines.append("END")
     out_path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
     return TargetDefinition(
@@ -148,10 +194,10 @@ def prepare_template_pdb(template: TargetDefinition, prepared_dir: Path) -> Targ
 
 
 def resolve_existing_path(raw_path: object, base_dir: Path) -> Path:
-    candidate = Path(str(raw_path))
+    candidate = Path(required_text(raw_path, "template_path"))
     if not candidate.is_absolute():
         candidate = (base_dir / candidate).resolve()
-    if not candidate.exists():
+    if not candidate.is_file():
         raise FileNotFoundError(f"Missing file: {candidate}")
     return candidate
 
@@ -164,13 +210,15 @@ def load_targets(targets_path: Path) -> dict[str, TargetDefinition]:
         raise ValueError(f"Targets table missing required columns: {sorted(missing)}")
     definitions: dict[str, TargetDefinition] = {}
     for row in target_df.to_dict("records"):
-        target_name = str(row["target_name"]).strip()
-        if not target_name:
-            raise ValueError("Encountered blank target_name in targets table")
+        target_name = required_text(row["target_name"], "target_name in targets table")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", target_name):
+            raise ValueError(f"target_name must be a safe filename component: {target_name!r}")
         if target_name in definitions:
             raise ValueError(f"Duplicate target_name in targets table: {target_name}")
         chain = row.get("template_chain")
         chain_value = str(chain).strip() if pd.notna(chain) and str(chain).strip() else None
+        if chain_value is not None and len(chain_value) != 1:
+            raise ValueError("template_chain must be a single PDB chain character")
         definitions[target_name] = TargetDefinition(
             target_name=target_name,
             template_path=resolve_existing_path(row["template_path"], targets_path.parent),
@@ -188,8 +236,8 @@ def build_normalized_input(input_path: Path, targets: dict[str, TargetDefinition
         raise ValueError(f"Input table missing required columns: {sorted(missing)}")
     records: list[dict[str, object]] = []
     for input_row_index, row in enumerate(input_df.to_dict("records"), start=1):
-        sequence_id = str(row["sequence_id"]).strip()
-        target_name = str(row["target_name"]).strip()
+        sequence_id = required_text(row["sequence_id"], f"sequence_id on input row {input_row_index}")
+        target_name = required_text(row["target_name"], f"target_name on input row {input_row_index}")
         if not sequence_id:
             raise ValueError(f"Blank sequence_id on input row {input_row_index}")
         if target_name not in targets:
@@ -234,8 +282,52 @@ def validate_normalized_input(normalized_df: pd.DataFrame, allow_duplicate_seque
 def load_existing_checkpoint(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid checkpoint JSON at {path}:{number}; preserve the file and repair the incomplete line before resuming") from exc
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def prediction_provenance(sequence: str, model: str) -> dict[str, str]:
+    return {"sequence": sequence, "model": model, "endpoint": OFFICIAL_FOLD_API_URL,
+            "conversion_version": CONVERSION_VERSION}
+
+
+def scoring_signature(target: TargetDefinition, source: TargetDefinition, executable: str) -> str:
+    config = {"reference_sha256": sha256_file(source.template_path),
+              "prepared_sha256": sha256_file(target.template_path), "chain": source.template_chain,
+              "reference_policy": REFERENCE_POLICY, "tmalign_sha256": executable,
+              "arguments": ["prediction", "reference"], "conversion_version": CONVERSION_VERSION,
+              "endpoint": OFFICIAL_FOLD_API_URL}
+    return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+
+def verified_checkpoint(existing: pd.DataFrame, current: pd.DataFrame) -> pd.DataFrame:
+    if existing.empty:
+        return existing
+    if not {"fold_task_id", "scoring_signature", "status"} <= set(existing.columns):
+        warnings.warn("Legacy checkpoint lacks provenance; no old scores are reused. Predictions require validated cache sidecars.")
+        return pd.DataFrame()
+    signatures = current.set_index("fold_task_id")["scoring_signature"].to_dict()
+    valid = existing["scoring_signature"].eq(existing["fold_task_id"].map(signatures))
+    for idx, row in existing.loc[valid & existing["status"].eq("scored")].iterrows():
+        path = Path(str(row.get("predicted_pdb_path", "")))
+        if not path.is_file() or row.get("prediction_sha256") != sha256_file(path):
+            valid.loc[idx] = False
+    rejected = int((~valid).sum())
+    if rejected:
+        warnings.warn(f"Ignoring {rejected} checkpoint entries outside the current verified configuration")
+    return existing.loc[valid].copy()
 
 
 def completed_statuses_for_run(retry_failed: bool) -> set[str]:
@@ -250,9 +342,8 @@ def deduplicate_results(df: pd.DataFrame) -> pd.DataFrame:
     clean = df.copy()
     if "completed_unix" not in clean.columns:
         clean["completed_unix"] = 0.0
-    clean["has_tm_score"] = clean["tm_score"].notna() if "tm_score" in clean.columns else False
-    clean = clean.sort_values(["fold_task_id", "has_tm_score", "completed_unix"], ascending=[True, False, False])
-    return clean.drop_duplicates(subset=["fold_task_id"], keep="first").drop(columns=["has_tm_score"])
+    clean = clean.sort_values(["fold_task_id", "completed_unix"], ascending=[True, False], na_position="last")
+    return clean.drop_duplicates(subset=["fold_task_id"], keep="first")
 
 
 def merge_results(normalized_df: pd.DataFrame, unique_results_df: pd.DataFrame) -> pd.DataFrame:
@@ -270,6 +361,7 @@ def merge_results(normalized_df: pd.DataFrame, unique_results_df: pd.DataFrame) 
         "fold_elapsed_s",
         "tmalign_elapsed_s",
         "predicted_pdb_path",
+        "prediction_sha256",
         "error",
         "completed_unix",
     ]
@@ -278,12 +370,15 @@ def merge_results(normalized_df: pd.DataFrame, unique_results_df: pd.DataFrame) 
         merged = normalized_df.copy()
         merged["status"] = "pending"
         return merged
-    return normalized_df.merge(unique_results_df[available], on="fold_task_id", how="left", validate="many_to_one")
+    merged = normalized_df.merge(unique_results_df[available], on="fold_task_id", how="left", validate="many_to_one")
+    merged["status"] = merged["status"].fillna("pending")
+    return merged
 
 
 def summarize_results(results_df: pd.DataFrame) -> dict[str, object]:
-    scored = results_df.loc[results_df["tm_score"].notna()].copy() if "tm_score" in results_df.columns else pd.DataFrame()
+    scored = results_df.loc[results_df["status"].eq("scored") & results_df["tm_score"].notna()].copy() if "tm_score" in results_df.columns else pd.DataFrame()
     summary: dict[str, object] = {
+        "score_statistics_unit": "input rows (including repeated sequences); failures excluded",
         "n_rows": int(len(results_df)),
         "n_unique_tasks": int(results_df["fold_task_id"].nunique()),
         "n_scored_rows": int(len(scored)),
@@ -294,11 +389,12 @@ def summarize_results(results_df: pd.DataFrame) -> dict[str, object]:
     if "status" in results_df.columns:
         summary["status_counts"] = {str(key): int(value) for key, value in results_df["status"].fillna("pending").value_counts().items()}
     for target_name, target_df in results_df.groupby("target_name", dropna=False):
-        target_scored = target_df.loc[target_df["tm_score"].notna()].copy() if "tm_score" in target_df.columns else pd.DataFrame()
+        target_scored = target_df.loc[target_df["status"].eq("scored") & target_df["tm_score"].notna()].copy() if "tm_score" in target_df.columns else pd.DataFrame()
         target_summary: dict[str, object] = {
             "n_rows": int(len(target_df)),
             "n_unique_tasks": int(target_df["fold_task_id"].nunique()),
             "n_scored_rows": int(len(target_scored)),
+            "status_counts": {str(k): int(v) for k, v in target_df["status"].fillna("pending").value_counts().items()},
         }
         if not target_scored.empty:
             scores = [float(value) for value in target_scored["tm_score"]]
@@ -315,48 +411,79 @@ def summarize_results(results_df: pd.DataFrame) -> dict[str, object]:
 
 
 def build_ca_pdb_from_coordinates(sequence: str, coordinates: list[object]) -> str:
-    lines: list[str] = []
+    if len(coordinates) != len(sequence):
+        raise ValueError(f"Coordinate/sequence length mismatch: {len(coordinates)} vs {len(sequence)}")
+    lines: list[str] = ["REMARK 900 CA ONLY FROM ATOM37; B FACTOR 0 IS NOT MODEL CONFIDENCE"]
     atom_serial = 1
+    missing = []
     for residue_index, (aa, residue_atoms) in enumerate(zip(sequence, coordinates, strict=True), start=1):
-        if not isinstance(residue_atoms, list) or len(residue_atoms) < 2:
-            continue
+        if not isinstance(residue_atoms, list) or len(residue_atoms) != 37:
+            raise ValueError(f"Residue {residue_index}: expected atom37 layout [37,3]")
+        if any(not isinstance(atom, list) or len(atom) != 3 for atom in residue_atoms):
+            raise ValueError(f"Residue {residue_index}: malformed atom37 coordinate triples")
         ca_atom = residue_atoms[1]
-        if not isinstance(ca_atom, list) or len(ca_atom) != 3 or any(coord is None for coord in ca_atom):
+        if all(coord is None for coord in ca_atom):
+            missing.append(residue_index)
             continue
-        x, y, z = [float(coord) for coord in ca_atom]
+        try:
+            x, y, z = [float(coord) for coord in ca_atom]
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Residue {residue_index}: expected three numeric CA coordinates or an all-null missing triple") from exc
+        if not all(math.isfinite(v) and -999.999 <= v <= 9999.999 for v in (x, y, z)):
+            raise ValueError(f"Residue {residue_index}: nonfinite or PDB-unrepresentable CA coordinate")
         lines.append(
             f"ATOM  {atom_serial:5d}  CA  {AA1_TO_AA3[aa]:>3s} A{residue_index:4d}    "
-            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 50.00           C"
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C"
         )
         atom_serial += 1
-    if atom_serial == 1:
-        raise ValueError("Fold response did not include usable CA coordinates")
+    if atom_serial < 4:
+        raise ValueError("Fold response contains fewer than three usable CA coordinates")
+    if missing:
+        warnings.warn(f"Skipped missing CA coordinates at sequence positions {missing}")
+        lines.insert(1, "REMARK 900 MISSING CA POSITIONS " + ",".join(map(str, missing)))
     lines.append("END")
     return "\n".join(lines) + "\n"
 
 
 def fold_payload_to_pdb(sequence: str, payload: dict[str, object]) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("Fold response must be a JSON object")
     pdb_text = payload.get("pdb")
     if isinstance(pdb_text, str) and pdb_text.strip():
-        return pdb_text if pdb_text.endswith("\n") else pdb_text + "\n"
+        validate_prediction_pdb(sequence, pdb_text)
+        return "REMARK 900 CA ONLY EXTRACTED FROM API PDB\n" + "\n".join(selected_ca_records(pdb_text)) + "\nEND\n"
     coordinates = payload.get("coordinates")
     if isinstance(coordinates, list):
         return build_ca_pdb_from_coordinates(sequence, coordinates)
     raise ValueError("Fold response missing both pdb text and coordinates")
 
 
+def validate_prediction_pdb(sequence: str, text: str) -> None:
+    for line in selected_ca_records(text):
+        position = int(line[22:26])
+        if line[26:27].strip() or not 1 <= position <= len(sequence):
+            raise ValueError("Prediction PDB requires sequence-based numbering 1..L without insertion codes")
+        if AA3_TO_AA1[line[17:20]] != sequence[position - 1]:
+            raise ValueError(f"Prediction PDB sequence mismatch at residue {position}")
+
+
 def parse_tmalign_output(stdout: str) -> dict[str, float | int | None]:
-    tm_scores = [float(match) for match in TMALIGN_SCORE_RE.findall(stdout)]
-    if len(tm_scores) < 2:
-        raise ValueError("Could not parse TM-score values from TM-align output")
+    tm_scores = {int(chain): float(score) for score, chain in re.findall(
+        r"TM-score\s*=\s*([0-9.]+)\s*\(if normalized by length of Chain_([12])", stdout)}
+    if set(tm_scores) != {1, 2} or any(not 0 <= v <= 1 for v in tm_scores.values()):
+        raise ValueError("Could not parse explicitly Chain_1/Chain_2-normalized TM-scores")
     lengths = {int(chain): int(length) for chain, length in TMALIGN_LEN_RE.findall(stdout)}
     aligned_match = TMALIGN_ALIGNED_RE.search(stdout)
+    if set(lengths) != {1, 2} or not aligned_match:
+        raise ValueError("Missing structural lengths or alignment metrics in TM-align output")
     aligned_length = int(aligned_match.group(1)) if aligned_match else None
     rmsd = float(aligned_match.group(2)) if aligned_match else None
     seq_identity = float(aligned_match.group(3)) if aligned_match else None
+    if not 1 <= aligned_length <= min(lengths.values()) or not 0 <= seq_identity <= 1 or not math.isfinite(rmsd):
+        raise ValueError("Inconsistent alignment length, RMSD, or sequence identity in TM-align output")
     return {
-        "tm_score_query": tm_scores[0],
-        "tm_score": tm_scores[1],
+        "tm_score_query": tm_scores[1],
+        "tm_score": tm_scores[2],
         "predicted_length": lengths.get(1),
         "wt_length": lengths.get(2),
         "aligned_length": aligned_length,
@@ -390,8 +517,18 @@ async def fold_sequence(
     retry_sleep_seconds: float,
     attempt_log_path: Path,
 ) -> tuple[Path | None, int, str | None]:
-    if out_pdb.exists() and out_pdb.stat().st_size > 0:
-        return out_pdb, 0, None
+    sidecar = out_pdb.with_suffix(".json")
+    provenance = prediction_provenance(sequence, model)
+    if out_pdb.is_file() and sidecar.is_file():
+        try:
+            metadata = json.loads(sidecar.read_text())
+            if isinstance(metadata, dict) and all(metadata.get(k) == v for k, v in provenance.items()) and metadata.get("pdb_sha256") == sha256_file(out_pdb):
+                validate_prediction_pdb(sequence, out_pdb.read_text())
+                return out_pdb, 0, None
+        except (ValueError, TypeError, OSError):
+            pass
+    if out_pdb.exists():
+        warnings.warn(f"Unverified/stale prediction cache will be replaced after successful folding: {out_pdb}")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     last_error: str | None = None
     for attempt in range(1, max_retries + 1):
@@ -405,8 +542,19 @@ async def fold_sequence(
                 ) as response:
                     if response.status == 200:
                         payload = await response.json()
+                        if payload.get("model") is not None and payload["model"] != model:
+                            raise ValueError(f"Response model {payload['model']!r} differs from requested {model!r}")
                         pdb_text = fold_payload_to_pdb(sequence, payload)
-                        out_pdb.write_text(pdb_text, encoding="utf-8")
+                        validate_prediction_pdb(sequence, pdb_text)
+                        temporary = out_pdb.with_suffix(".pdb.tmp")
+                        temporary.write_text(pdb_text, encoding="utf-8")
+                        temporary.replace(out_pdb)
+                        metadata = {**provenance, "pdb_sha256": sha256_file(out_pdb),
+                                    "response_model": payload.get("model"), "created_unix": time.time(),
+                                    "warning_messages": payload.get("warning_messages", [])}
+                        temporary = sidecar.with_suffix(".json.tmp")
+                        temporary.write_text(json.dumps(metadata, indent=2) + "\n")
+                        temporary.replace(sidecar)
                         return out_pdb, attempt, None
                     error_text = (await response.text())[:400].replace("\n", " ")
                     last_error = f"HTTP {response.status}: {error_text}"
@@ -516,11 +664,13 @@ async def fold_and_score(
             fold_elapsed_s = time.time() - fold_start
             result: dict[str, object] = {
                 **record,
+                **{key: None for key in ("tm_score", "tm_score_query", "aligned_length", "rmsd", "seq_identity_aligned", "predicted_length", "wt_length")},
                 "status": "fold_failed" if pdb_path is None else "folded",
                 "fold_attempts": attempts,
                 "fold_elapsed_s": fold_elapsed_s,
                 "tmalign_elapsed_s": 0.0,
                 "predicted_pdb_path": str(pdb_path) if pdb_path is not None else None,
+                "prediction_sha256": sha256_file(pdb_path) if pdb_path is not None else None,
                 "error": fold_error,
                 "completed_unix": time.time(),
             }
@@ -563,7 +713,7 @@ async def fold_and_score(
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -577,7 +727,9 @@ def parse_seqres_sequences(path: Path) -> dict[str, str]:
             chain = raw_line[11].strip() or "A"
             residues = raw_line[19:].split()
             sequences.setdefault(chain, [])
-            sequences[chain].extend(AA3_TO_AA1[residue] for residue in residues if residue in AA3_TO_AA1)
+            if any(residue not in AA3_TO_AA1 for residue in residues):
+                raise ValueError(f"Unsupported SEQRES residue in {path}, chain {chain}")
+            sequences[chain].extend(AA3_TO_AA1[residue] for residue in residues)
     return {chain: "".join(residues) for chain, residues in sequences.items() if residues}
 
 
@@ -598,13 +750,13 @@ def make_smoke_test(outdir: Path, tem_template: Path, aph_template: Path) -> Non
     targets_rows = [
         {
             "target_name": "tem",
-            "template_path": str(tem_path),
+            "template_path": os.path.relpath(tem_path, outdir),
             "template_chain": "A",
             "description": "TEM template from local PDB",
         },
         {
             "target_name": "aph",
-            "template_path": str(aph_path),
+            "template_path": os.path.relpath(aph_path, outdir),
             "template_chain": "A",
             "description": "APH template from local PDB",
         },
@@ -621,17 +773,40 @@ def make_smoke_test(outdir: Path, tem_template: Path, aph_template: Path) -> Non
     print(f"[INFO] wrote smoke test sequences to {outdir / 'sequences.csv'}")
 
 
+def validate_runtime_options(args: argparse.Namespace) -> None:
+    for name in ("max_concurrent_requests", "max_concurrent_tmalign", "max_retries", "request_timeout"):
+        if getattr(args, name) <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    for name in ("retry_sleep_seconds", "cooldown_seconds", "progress_log_every", "progress_save_every"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be finite and nonnegative")
+    if args.limit is not None and args.limit <= 0:
+        raise ValueError("--limit must be positive")
+    required_text(args.model, "--model")
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
+    validate_runtime_options(args)
     outdir = args.outdir.resolve()
+    if args.prepare_only and (outdir / "checkpoint.jsonl").exists():
+        raise ValueError("--prepare-only would overwrite aggregate results beside an existing checkpoint; use a fresh preparation outdir")
     folded_dir = args.folded_dir.resolve() if args.folded_dir else (outdir / "folded_pdbs")
     outdir.mkdir(parents=True, exist_ok=True)
     folded_dir.mkdir(parents=True, exist_ok=True)
 
+    source_targets = load_targets(args.targets.resolve())
     targets = {
         target_name: prepare_template_pdb(target, outdir / "prepared_templates")
-        for target_name, target in load_targets(args.targets.resolve()).items()
+        for target_name, target in source_targets.items()
     }
     normalized_df = build_normalized_input(args.input.resolve(), targets, args.model)
+    executable = shutil.which("TMalign")
+    executable_hash = sha256_file(Path(executable)) if executable else "unavailable-prepare-only"
+    signatures = {name: scoring_signature(target, source_targets[name], executable_hash) for name, target in targets.items()}
+    normalized_df["scoring_signature"] = normalized_df["target_name"].map(signatures)
+    normalized_df["reference_source_path"] = normalized_df["target_name"].map({name: str(t.template_path) for name, t in source_targets.items()})
+    normalized_df["reference_sha256"] = normalized_df["target_name"].map({name: sha256_file(t.template_path) for name, t in source_targets.items()})
     validate_normalized_input(normalized_df, allow_duplicate_sequence_ids=args.allow_duplicate_sequence_ids)
     unique_df = normalized_df.drop_duplicates(subset=["fold_task_id"], keep="first").reset_index(drop=True)
     if args.limit is not None:
@@ -672,7 +847,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     checkpoint_path = outdir / "checkpoint.jsonl"
     attempt_log_path = outdir / "attempt_log.jsonl"
-    existing_results_df = deduplicate_results(load_existing_checkpoint(checkpoint_path))
+    existing_results_df = deduplicate_results(verified_checkpoint(load_existing_checkpoint(checkpoint_path), unique_df))
     completed_ids = set()
     if not existing_results_df.empty and "status" in existing_results_df.columns:
         completed_statuses = completed_statuses_for_run(retry_failed=args.retry_failed)
@@ -689,7 +864,6 @@ def run_pipeline(args: argparse.Namespace) -> None:
         f"completed={len(completed_ids)} pending={len(pending_df)} model={args.model}",
         flush=True,
     )
-
     new_results_df = pd.DataFrame()
     if not pending_df.empty:
         new_results_df = asyncio.run(
@@ -735,4 +909,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        raise SystemExit(f"Error: {exc}") from exc

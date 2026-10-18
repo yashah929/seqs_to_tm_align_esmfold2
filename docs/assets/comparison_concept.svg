@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="300" viewBox="0 0 1000 300" role="img" aria-labelledby="title desc">
+<title id="title">Conceptual structural comparison — no prediction available</title><desc id="desc">Diagram only. A real comparison requires an API prediction aligned to the experimental reference; no structure or score is depicted.</desc>
+<defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 Z" fill="#607387"/></marker></defs>
+<rect width="1000" height="300" fill="white"/>
+<g font-family="Arial, Helvetica, sans-serif" fill="#203348">
+<text x="30" y="38" font-size="24" fill="#203348" font-weight="bold">Conceptual comparison · no model-generated result shown</text>
+<rect x="30" y="80" width="280" height="125" rx="12" fill="#f3f7fd" stroke="#2864b4" stroke-width="1.5"/>
+<text x="48" y="111" font-size="20" fill="#2864b4" font-weight="bold">Candidate prediction</text>
+<text x="48" y="144" font-size="18" fill="#203348" font-weight="normal">TEM: tem_wt baseline</text>
+<text x="48" y="170" font-size="18" fill="#203348" font-weight="normal">esmfold2-fast-2026-05</text>
+<rect x="690" y="80" width="280" height="125" rx="12" fill="#fff7ee" stroke="#b15b16" stroke-width="1.5"/>
+<text x="708" y="111" font-size="20" fill="#b15b16" font-weight="bold">Experimental reference</text>
+<text x="708" y="144" font-size="18" fill="#203348" font-weight="normal">TEM-1 · PDB 1AXB · A</text>
+<text x="708" y="170" font-size="18" fill="#203348" font-weight="normal">X-ray · inhibitor-bound</text>
+<rect x="370" y="80" width="260" height="125" rx="12" fill="#f0f8f5" stroke="#18786b" stroke-width="1.5"/>
+<text x="388" y="111" font-size="20" fill="#18786b" font-weight="bold">Structural superposition</text>
+<text x="388" y="144" font-size="18" fill="#203348" font-weight="normal">Requires a real prediction</text>
+<text x="388" y="170" font-size="18" fill="#203348" font-weight="normal">No TM-score reported</text>
+<path d="M310 140 H363" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M690 140 H637" fill="none" stroke="#607387" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="30" y="250" font-size="18" fill="#203348" font-weight="normal">Once predictions exist, render_comparison.py uses the actual TM-align rotation and metrics.</text>
+<text x="30" y="276" font-size="18" fill="#203348" font-weight="normal">The pipeline retains Cα-only predictions; the rendering shows Cα traces.</text>
+</g></svg>

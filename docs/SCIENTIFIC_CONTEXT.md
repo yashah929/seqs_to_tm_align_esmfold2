@@ -1,130 +1,55 @@
-# Scientific Context
+# Scientific context and provenance
 
-This document is meant to supply the conceptual background for the repository, not just a list of references. It explains what structural question the pipeline is intended to answer, why TM-score is used as the main endpoint, and why the WT/reference-normalized score is the quantity carried through the outputs.
+## Question and interpretation
 
-## Overarching Goal
+The candidate sequence is the input; its model-predicted structure is the query; an experimentally determined structure is the reference. The endpoint is predicted fold preservation relative to that reference. A candidate with high structural similarity has computational support for a similar global fold, not evidence of measured folding, stability, activity, binding, or biological function.
 
-The purpose of this repository is to measure whether a designed or mutated amino-acid sequence remains close to the wild-type structure in three-dimensional space.
+[TM-align](https://doi.org/10.1093/nar/gki524) finds a structural residue alignment and superposition. TM-score downweights distant pairs relative to squared-distance measures such as RMSD. The pipeline uses `TMalign prediction.pdb reference.pdb`, parses each score's explicit `Chain_1`/`Chain_2` normalization label, and retains the reference-normalized score as `tm_score`. Both lengths, aligned length, RMSD (Å), and aligned identical-residue fraction are retained. No sequence alignment or canonical sequence length is substituted for the structural normalization length.
 
-That is a different question from ordinary sequence similarity. Two sequences can be different while preserving the same overall fold, and two sequences can remain fairly similar while introducing a structural failure that matters biologically. If the working hypothesis is that a sequence should retain the WT architecture, then structural comparison is the right level of analysis.
+Reference normalization anchors comparisons to the supplied observed structure. For 1ND4 chain A, that is 255 Cα positions, not the 264-residue deposited sequence. Examine `aligned_length / wt_length` and `aligned_length / predicted_length` alongside both TM-scores. A short query matching a small domain may have a much higher query-normalized score than reference-normalized score. Missing coordinates reduce the structure being assessed; a high score against an incomplete reference cannot establish preservation of omitted regions.
 
-The workflow is simple:
+Rank or compare distributions within the same target, reference, chain, and prediction model. A global score can hide local active-site rearrangements, altered side chains, interface defects, or domain orientation changes. Ligand-bound references can differ from unliganded predictions. Single-chain scoring does not assess assemblies, ligand recognition, dynamics, or oligomerization. There is no universal TM-score threshold that validates a design.
 
-1. fold each candidate sequence with the ESM API
-2. compare the predicted structure to the correct WT/reference structure with TM-align
-3. store the resulting similarity score in a form that can be analyzed across large batches
+The deposited-sequence baseline asks how a prediction of the reference construct compares with its measured conformation. It contextualizes a variant score but does not fully isolate prediction error from mutation effects: prediction uncertainty, model biases, state/ligand differences, and construct differences remain coupled. The pipeline does not analyze confidence tracks, and similarity to a known reference is not an independent benchmark of model generalization or absence of training-set overlap.
 
-## Why Use TM-align
+## Bundled experimental references
 
-TM-align is a structure alignment method built around the TM-score rather than around RMSD alone.
+The original `.ent` files are retained unchanged. Example sequences are extracted from chain-A `SEQRES`; observed Cα records come from `ATOM`. No missing residues are filled from coordinates, and no unknown SEQRES residues are silently dropped.
 
-That matters because RMSD has a well-known weakness: a small number of badly placed residues can inflate the score even when the global fold is still largely correct. For variant screening and batch comparison, that is often the wrong emphasis. In many applications you care more about whether the overall topology is retained than about a few local coordinate deviations.
+| Detail | TEM (`TEM_pdb.ent`) | APH (`APH_pdb.ent`) |
+| --- | --- | --- |
+| Accession | [1AXB](https://www.rcsb.org/structure/1AXB) | [1ND4](https://www.rcsb.org/structure/1ND4) |
+| Protein and organism | TEM-1 β-lactamase, *Escherichia coli* | Aminoglycoside 3′-phosphotransferase IIa, *Klebsiella pneumoniae* |
+| Selected chain | A (only protein chain) | A (B is present but excluded) |
+| Method / resolution | X-ray diffraction / 2.00 Å | X-ray diffraction / 2.10 Å |
+| Deposited / observed Cα length | 263 / 263 | 264 / 255 |
+| Construct context | DBREF maps to P62593 residues 24–286, excluding the precursor's N-terminal signal sequence; PDB numbering starts at 26 and has numbering gaps | DBREF maps to P00552 residues 1–264; `REMARK 465` lists residues 1–9 unresolved in both A and B |
+| Bound components excluded from scoring | Phosphonate acylation-transition-state analog (FOS), covalently associated with Ser70 | Kanamycin, ions, acetate, and waters |
 
-The TM-align paper addressed this directly. Its scoring function weights close residue pairs more heavily and downweights large local deviations, making the score more responsive to global structural agreement. That is the reason TM-score remains useful in large structural screens where fold preservation, rather than local coordinate perfection, is the main endpoint.
+The local TEM `COMPND` marks both `ENGINEERED: YES` and `MUTATION: YES`; current RCSB lists zero mutations. No specific sequence substitution is identified by the local header. This discrepancy is unresolved here; the example uses the deposited sequence and describes the construct rather than asserting exact canonical WT identity. APH is also marked engineered in the local header; RCSB lists zero mutations, but its ligand-bound state and missing N-terminal coordinates still matter. “WT reference” names the intended comparison role, not a guarantee that every experimental construct is an unmodified full-length apo WT.
 
-Primary reference:
+Primary experimental reports are [Maveyraud, Pratt & Samama (1998), DOI 10.1021/bi972501b](https://doi.org/10.1021/bi972501b) for 1AXB and [Nurizzo et al. (2003), DOI 10.1016/S0022-2836(03)00121-9](https://doi.org/10.1016/S0022-2836(03)00121-9) for 1ND4. Header metadata and observed lengths were checked locally; experimental identities, methods, resolutions, and ligand context were cross-checked against those RCSB entries on 2026-10-18.
 
-- Zhang Y, Skolnick J. TM-align: a protein structure alignment algorithm based on the TM-score. *Nucleic Acids Research* 33(7):2302-2309. https://pmc.ncbi.nlm.nih.gov/articles/PMC1084323/
+## Folding service and coordinate contract
 
-## What TM-score Means In This Repository
+Checked against available official documentation on 2026-10-18; no live inference was performed:
 
-TM-align reports two TM-scores for a pairwise comparison. The alignment is the same, but the normalization length differs:
+| Implementation | Official source / verification |
+| --- | --- |
+| Bearer-authenticated `POST https://biohub.ai/api/v1/fold` with JSON `sequence` and `model` | [Biohub fold API](https://docs.biohub.ai/api/protein/models/fold) documents endpoint, authentication, and JSON coordinates |
+| Default `esmfold2-fast-2026-05` | [Biohub model page](https://biohub.ai/models/esmfold2) uses this identifier; the API reference names it as the default |
+| JSON `coordinates` interpreted as `[L,37,3]` with Cα at atom index 1 | [Official SDK fold response](https://github.com/Biohub/esm/blob/main/esm/sdk/forge.py), [ProteinChain atom37 implementation](https://github.com/Biohub/esm/blob/main/esm/utils/structure/protein_chain.py), and [atom ordering constants](https://github.com/Biohub/esm/blob/main/esm/utils/residue_constants.py); local installed SDK also inspected |
 
-- one score is normalized by the query or predicted structure length
-- the other is normalized by the reference structure length
+The API reference describes nested coordinate arrays but does not spell out every dimension or atom order. The atom37 interpretation follows the official SDK's protein representation and constants (`N`, `CA`, `C`, …). The converter requires exactly 37 coordinate triples per sequence position and exact sequence/coordinate outer-length agreement; an alternate layout is rejected rather than guessed. This contract has not been confirmed with a new live response in this cleanup.
 
-For this repository, the primary field is:
+Only Cα coordinates are written to predicted PDBs, even though the service model supports fuller atomic output. An all-null Cα triple is omitted with a warning and a PDB remark listing missing sequence positions; sequence-based residue numbers are preserved. Partial-null, nonfinite, malformed, or PDB-unrepresentable Cα coordinates fail conversion. Fewer than three usable Cα atoms fail. Non-Cα slots are not used for scoring. Coordinate-derived B factors are zero placeholders, not pLDDT. Confidence output is not a reported endpoint.
 
-- `tm_score`: TM-score normalized by the WT/reference structure length
+A raw `pdb` response remains supported for compatibility, but it is not promised by the documented JSON schema. It must have one model/chain, standard residues, finite Cα coordinates, sequence-matching residue identities, and positions in 1..L without insertion codes. It is reduced to one Cα per residue before caching. Prepared references follow the same observed-coordinate policy described in [usage](USAGE.md).
 
-The secondary field is:
+The endpoint and model are retained, with no silent fallback to another provider or original ESMFold. Only `sequence` and `model` are explicitly requested; other inference settings use server defaults, which may change. Response model identity is checked when supplied, and recorded in cache metadata; absence of that field remains an uncertainty. Exact remote weights/defaults and deterministic reproducibility cannot be established by a local cache signature.
 
-- `tm_score_query`: TM-score normalized by the predicted-query length
+## Model references
 
-That choice follows from the biological question.
+The official [Biohub ESM repository](https://github.com/Biohub/esm) links ESMFold2 to **Language Modeling Materializes a World Model of Protein Biology**, [2026 preprint](https://www.biorxiv.org/content/10.64898/2026.06.03.729735). The preprint page itself was access-blocked during verification, so the model page, API documentation, and SDK are the checked sources for service behavior. We do not infer undocumented details of the Fast deployment from the preprint.
 
-The WT/reference structure is the anchor. It is the structure whose preservation matters. When a candidate sequence is longer, shorter, slightly truncated, or otherwise perturbed, normalizing by the WT length keeps the score tied to the reference object rather than to the idiosyncrasies of the candidate.
-
-Put plainly, the repository is meant to answer "how well does this candidate reproduce the WT structure?" rather than "how well does the candidate score after being normalized to itself?"
-
-## Why Not Use RMSD As The Main Output
-
-RMSD is still useful, and the pipeline records it. But it is not the best headline metric here.
-
-Reasons:
-
-- RMSD is sensitive to a few large local deviations
-- RMSD depends strongly on the aligned subset and the overall length scale
-- RMSD alone is a poor single-number summary of fold preservation across large and diverse batches
-
-TM-score is not magic, but it is usually a better first-pass structural similarity metric for this exact use case.
-
-## Why Use The ESM API
-
-The repository is intentionally API-based. It does not try to maintain separate local-model and remote-model code paths.
-
-That design choice keeps the operational story simple:
-
-- one folding backend
-- one request format
-- one response interpretation layer
-- one checkpointed pipeline
-
-The current implementation uses:
-
-- `POST https://biohub.ai/api/v1/fold`
-- default model: `esmfold2-fast-2026-05`
-
-The endpoint was checked during development to confirm the response shape used here. In the observed response, the API returns coordinate arrays, which the pipeline converts into a PDB when raw PDB text is absent.
-
-For background on the model family, the relevant reference is the original ESMFold paper:
-
-- Lin Z, Akin H, Rao R, Hie B, Zhu Z, et al. Evolutionary-scale prediction of atomic-level protein structure with a language model. *Science*. 2023;379(6637):1123-1130. https://www.science.org/doi/10.1126/science.ade2574
-
-For the newer `ESMFold2-Fast` / `ESMFold2` naming used by the current API model, I have not located a standalone methods paper. The most direct citable source I found is a recent preprint that explicitly uses those model names:
-
-- Hu Y, Cheng W, Wang J, Liu Y. EasyNano: rapid epitope-targeted nanobody CDR design via differentiable distogram optimization with ESMFold2. *arXiv*. 2026. https://arxiv.org/abs/2606.12772
-
-## What This Pipeline Is Good For
-
-This repository is a good fit when:
-
-- you already know which WT/reference structure each candidate should be compared against
-- you need a consistent structural similarity score across many candidate sequences
-- you need resumability because folding large batches may take time or fail intermittently
-- you want outputs that can be read directly into analysis notebooks or downstream scoring pipelines
-
-Typical examples:
-
-- variant libraries tied to a known parent protein
-- design campaigns where candidates are supposed to preserve a known fold
-- structure-preservation checks after mutation, recombination, or optimization
-
-## What This Pipeline Does Not Do
-
-It does not try to solve every structural comparison problem.
-
-In particular:
-
-- it does not discover the correct reference automatically
-- it does not infer biological function from structure similarity alone
-- it does not replace local structural analysis of active sites or interfaces
-- it does not treat ESM confidence outputs as the main endpoint
-
-Those are different questions. This repository stays narrow: sequence in, fold, align to WT, report a structural similarity score that is easy to batch.
-
-## Practical Interpretation
-
-The most defensible use of the output is comparative:
-
-- rank candidates within the same target
-- compare distributions across candidate sets
-- inspect low-scoring outliers directly
-
-The score is most informative when the reference structure is fixed and the candidate set is coherent. That is the setting this repository was built for.
-
-## Additional References
-
-- Zhang Y, Skolnick J. TM-align: a protein structure alignment algorithm based on the TM-score. *Nucleic Acids Research*. 2005;33(7):2302-2309. https://pmc.ncbi.nlm.nih.gov/articles/PMC1084323/
-- Lin Z, Akin H, Rao R, Hie B, Zhu Z, et al. Evolutionary-scale prediction of atomic-level protein structure with a language model. *Science*. 2023;379(6637):1123-1130. https://www.science.org/doi/10.1126/science.ade2574
-- Hu Y, Cheng W, Wang J, Liu Y. EasyNano: rapid epitope-targeted nanobody CDR design via differentiable distogram optimization with ESMFold2. *arXiv*. 2026. https://arxiv.org/abs/2606.12772
+[Lin et al., *Science* 2023, 379:1123–1130, DOI 10.1126/science.ade2574](https://doi.org/10.1126/science.ade2574) describes the original ESMFold and provides historical context only. It does not document the deployed ESMFold2-Fast model. The previous EasyNano citation was removed because a downstream application preprint is not authoritative documentation of this service or model implementation.

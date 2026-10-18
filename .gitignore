@@ -3,3 +3,17 @@ __pycache__/
 *.pyc
 .venv/
 outputs/
+folded_pdbs/
+prepared_templates/
+examples/smoke_test_inputs/
+.env
+.env.*
+*.key
+*.pem
+checkpoint.jsonl
+attempt_log.jsonl
+normalized_input.csv
+unique_results.csv
+sequence_results.csv
+summary.json
+*.tmp
