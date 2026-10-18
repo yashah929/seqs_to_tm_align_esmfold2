@@ -2,6 +2,8 @@
 
 How closely does a candidate's predicted structure resemble the experimentally determined WT structure? This pipeline predicts a structure from each candidate amino-acid sequence with the configured ESMFold2 API model, then compares that prediction with the appropriate experimental reference using TM-align.
 
+Note that this is strictly a predicted computational assessment of fold preservation between designed and WT sequences. 
+
 This is a computational assessment of predicted fold preservation. Structural similarity alone does not establish experimental folding, stability, catalytic activity, binding, or biological function.
 
 ![Workflow separating candidate sequence and prediction in blue from the experimental reference and selected chain in orange; both feed TM-align and per-candidate metrics.](docs/assets/workflow.svg)
